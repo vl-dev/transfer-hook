@@ -1,6 +1,6 @@
 // Mark this test as SBF-only due to current `ProgramTest` limitations when
 // CPIing into the system program
-#![cfg(feature = "test-sbf")]
+#![cfg(feature = "forbid-additional-mints")]
 
 use {
     solana_program_test::{processor, tokio, ProgramTest},
