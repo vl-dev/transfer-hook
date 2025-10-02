@@ -47,7 +47,7 @@ echo "Building transfer-hook Account Meta"
 ./target/release/spl-transfer-hook create-extra-metas "$TRANSFER_HOOK_PROGRAM_ID" "$MINT" --url "$URL" ./accounts-config.json 
 
 # echo "Initializing transfer account..."
-PROGRAM_ID="$TRANSFER_HOOK_PROGRAM_ID" RPC_URL="http://$URL:8899" npx --yes ts-node initialize-transfer-account.ts
+PROGRAM_ID="$TRANSFER_HOOK_PROGRAM_ID" RPC_URL="http://$URL:8899" npx --yes ts-node scripts/initialize-transfer-account.ts
 
 echo "Transferring $TRANSFER_AMOUNT tokens to $RECIPIENT..."
 BLOCKHASH=$(curl -s "http://localhost:8899" -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash"}' | jq -r '.result.value.blockhash')
@@ -55,3 +55,6 @@ BLOCKHASH=$(curl -s "http://localhost:8899" -X POST -H "Content-Type: applicatio
 spl-token transfer "$MINT" "$TRANSFER_AMOUNT" "$RECIPIENT" --url "$URL" --allow-unfunded-recipient --fund-recipient --blockhash "$BLOCKHASH" --mint-decimals 9
 
 echo "Done. Mint: $MINT"
+
+echo "Getting user transfer account..."
+PROGRAM_ID="$TRANSFER_HOOK_PROGRAM_ID" RPC_URL="http://$URL:8899" npx --yes ts-node scripts/get-user-transfer-account.ts
