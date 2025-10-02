@@ -1,0 +1,14 @@
+{
+  "extraMetas": [
+    {
+      "seeds": [
+        {
+          "accountKey": {
+            "index": 3
+          }
+        }
+      ],
+      "role": "writable"
+    }
+  ]
+}

@@ -8,6 +8,7 @@ use {
         program::invoke_signed,
         program_error::ProgramError,
         pubkey::Pubkey,
+        rent::Rent,
     },
     solana_system_interface::instruction as system_instruction,
     spl_tlv_account_resolution::{account::ExtraAccountMeta, state::ExtraAccountMetaList},
@@ -23,6 +24,7 @@ use {
         get_extra_account_metas_address, get_extra_account_metas_address_and_bump_seed,
         instruction::{ExecuteInstruction, TransferHookInstruction},
     },
+    spl_type_length_value::state::TlvStateBorrowed,
 };
 
 fn check_token_account_is_transferring(account_info: &AccountInfo) -> Result<(), ProgramError> {
@@ -34,6 +36,120 @@ fn check_token_account_is_transferring(account_info: &AccountInfo) -> Result<(),
     } else {
         Err(TransferHookError::ProgramCalledOutsideOfTransfer.into())
     }
+}
+
+/// Transfer account state structure
+pub struct TransferAccount;
+
+impl TransferAccount {
+    /// Size of the transfer account data
+    pub const LEN: usize = 32 + 8; // Pubkey (32) + u64 (8)
+
+    // Offsets
+    const OWNER_OFFSET: usize = 0;
+    const TRANSFERED_OFFSET: usize = 32;
+
+    /// Pack transfer account data into bytes
+    pub fn pack(owner: &Pubkey, transfered: u64, dst: &mut [u8]) {
+        dst[Self::OWNER_OFFSET..Self::OWNER_OFFSET + 32].copy_from_slice(owner.as_ref());
+        dst[Self::TRANSFERED_OFFSET..Self::TRANSFERED_OFFSET + 8]
+            .copy_from_slice(&transfered.to_le_bytes());
+    }
+
+    /// Unpack transfer account data from bytes
+    pub fn unpack(src: &[u8]) -> Result<(Pubkey, u64), ProgramError> {
+        if src.len() < Self::LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        let owner = Pubkey::try_from(&src[Self::OWNER_OFFSET..Self::OWNER_OFFSET + 32])
+            .map_err(|_| ProgramError::InvalidAccountData)?;
+
+        let transfered = u64::from_le_bytes(
+            src[Self::TRANSFERED_OFFSET..Self::TRANSFERED_OFFSET + 8]
+                .try_into()
+                .map_err(|_| ProgramError::InvalidAccountData)?,
+        );
+
+        Ok((owner, transfered))
+    }
+
+    /// Update only the transferred amount
+    pub fn update_transfered(data: &mut [u8], transfered: u64) {
+        data[Self::TRANSFERED_OFFSET..Self::TRANSFERED_OFFSET + 8]
+            .copy_from_slice(&transfered.to_le_bytes());
+    }
+}
+
+/// Custom instruction discriminators
+pub mod instruction_discriminator {
+    /// Initialize transfer account (custom instruction)
+    pub const INITIALIZE_TRANSFER_ACCOUNT: u8 = 255;
+}
+
+/// Process InitializeTransferAccount instruction
+/// Accounts:
+/// 0. Owner/payer (signer, writable)
+/// 1. Transfer account (writable, derived from owner - matches index 3 in Execute)
+/// 2. System program
+pub fn process_initialize_transfer_account<'a>(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo<'a>],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+
+    let owner_info = next_account_info(account_info_iter)?;
+    let transfer_account_info = next_account_info(account_info_iter)?;
+    let system_program_info = next_account_info(account_info_iter)?;
+
+    // Verify owner is signer
+    if !owner_info.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // Verify transfer account is derived from owner (matches index 3 in Execute)
+    let (expected_pda, bump_seed) =
+        Pubkey::find_program_address(&[owner_info.key.as_ref()], program_id);
+    msg!("Expected PDA: {}", expected_pda);
+    msg!("Transfer account: {}", transfer_account_info.key);
+
+    if *transfer_account_info.key != expected_pda {
+        msg!(
+            "Invalid transfer account derivation. Expected: {}, Got: {}",
+            expected_pda,
+            transfer_account_info.key
+        );
+        return Err(ProgramError::InvalidSeeds);
+    }
+
+    // Check if account already exists
+    if transfer_account_info.lamports() > 0 {
+        msg!("Transfer account already exists");
+        return Ok(());
+    }
+
+    // Calculate rent
+    let required_lamports = Rent::default().minimum_balance(TransferAccount::LEN);
+
+    // Create account with seed
+    invoke_signed(
+        &system_instruction::create_account(
+            owner_info.key,
+            transfer_account_info.key,
+            required_lamports,
+            TransferAccount::LEN as u64,
+            program_id,
+        ),
+        &[owner_info.clone(), transfer_account_info.clone()],
+        &[&[&owner_info.key.to_bytes(), &[bump_seed]]],
+    )?;
+
+    // Initialize account data
+    let mut data = transfer_account_info.try_borrow_mut_data()?;
+    TransferAccount::pack(owner_info.key, 0, &mut data);
+
+    msg!("Transfer account initialized for owner: {}", owner_info.key);
+    Ok(())
 }
 
 /// Processes an [Execute](enum.TransferHookInstruction.html) instruction.
@@ -69,6 +185,40 @@ pub fn process_execute(
         program_id,
         &data,
     )?;
+
+    // Get the extra account metas from the account data
+    let data = extra_account_metas_info.try_borrow_data()?;
+    msg!("Data: {:?}", data);
+    let state = TlvStateBorrowed::unpack(&data).unwrap();
+    let _extra_account_metas =
+        ExtraAccountMetaList::unpack_with_tlv_state::<ExecuteInstruction>(&state)?;
+
+    // Get the transfer account (must already exist)
+    let transfer_account = next_account_info(account_info_iter)?;
+
+    // Verify transfer account exists and is initialized
+    if transfer_account.lamports() == 0 {
+        msg!("Transfer account does not exist. Call InitializeTransferAccount first.");
+        msg!("Transfer account: {}", transfer_account.key);
+        return Err(ProgramError::UninitializedAccount);
+    }
+
+    // Verify transfer account is owned by this program
+    if transfer_account.owner != program_id {
+        msg!("Transfer account not owned by program");
+        return Err(ProgramError::IllegalOwner);
+    }
+
+    // Update the transfer amount
+    let mut transfer_account_data = transfer_account.try_borrow_mut_data()?;
+    let (_, current_amount) = TransferAccount::unpack(&transfer_account_data)?;
+    TransferAccount::update_transfered(&mut transfer_account_data, current_amount + amount);
+
+    msg!(
+        "Transfer tracked: {} total for account {}",
+        current_amount + amount,
+        transfer_account.key
+    );
 
     Ok(())
 }
@@ -205,6 +355,13 @@ pub fn process_update_extra_account_meta_list(
 
 /// Processes an [Instruction](enum.Instruction.html).
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], input: &[u8]) -> ProgramResult {
+    // Check if this is a custom instruction (discriminator 255)
+    if !input.is_empty() && input[0] == instruction_discriminator::INITIALIZE_TRANSFER_ACCOUNT {
+        msg!("Instruction: InitializeTransferAccount");
+        return process_initialize_transfer_account(program_id, accounts);
+    }
+
+    // Otherwise, parse as standard TransferHookInstruction
     let instruction = TransferHookInstruction::unpack(input)?;
 
     match instruction {
@@ -219,10 +376,11 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], input: &[u8]) -> P
             process_initialize_extra_account_meta_list(program_id, accounts, &extra_account_metas)
         }
         TransferHookInstruction::UpdateExtraAccountMetaList {
-            extra_account_metas,
+            extra_account_metas: _,
         } => {
             msg!("Instruction: UpdateExtraAccountMetaList");
-            process_update_extra_account_meta_list(program_id, accounts, &extra_account_metas)
+            return Ok(());
+            // process_update_extra_account_meta_list(program_id, accounts, &extra_account_metas)
         }
     }
 }

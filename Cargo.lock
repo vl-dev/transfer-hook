@@ -10219,7 +10219,7 @@ dependencies = [
  "spl-tlv-account-resolution 0.10.0",
  "spl-token-2022 9.0.0",
  "spl-transfer-hook-interface 0.10.0",
- "spl-type-length-value 0.9.0",
+ "spl-type-length-value 0.8.0",
 ]
 
 [[package]]

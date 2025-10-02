@@ -26,5 +26,5 @@ pub use solana_program;
 /// unsafe, this simple example implementation only allows for one mint.
 #[cfg(feature = "forbid-additional-mints")]
 pub mod mint {
-    solana_program::declare_id!("Mint111111111111111111111111111111111111111");
+    solana_program::declare_id!("4GFAx7e1QWXWyCPX7HJ2C8u4TpXbKZsDdbP6hnM1hcjy");
 }
